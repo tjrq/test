@@ -1,0 +1,129 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse)
+#library(rstanarm)
+library(brms)
+library(coda)
+library(bayesplot)
+library(DHARMa)
+library(emmeans)
+library(broom)
+library(tidybayes)
+library(ggeffects)
+library(broom.mixed)
+library(bayestestR)
+library(see)
+library(easystats)
+library(patchwork)
+library(ggridges)
+source("helperFunctions.R")
+```
+
+# Read and prepare data
+
+```{r}
+ord_species_depth <- read_csv("Data/CSV_Full_Fish_Data.csv",
+                      trim_ws = TRUE)
+```
+
+```{r}
+ord_species_depth |> glimpse()
+```
+
+# Filter the following species (from Species_2)
+
+- Naso lituratus
+- Chlorurus spilurus
+- Acanthurus nigricans
+- Centropyge bispinosa
+- Acanthurus pyroferus
+- Ctenochaetus binotatus
+- Centropyge heraldi
+
+```{r}
+ord_species_depth2 <- ord_species_depth |> 
+  filter(Species_2 == "Naso lituratus" | 
+           Species_2 == "Chlorurus spilurus" |
+           Species_2 == "Acanthurus nigricans" |
+           Species_2 == "Centropyge bispinosa" |
+           Species_2 == "Acanthurus pyroferus" |
+           Species_2 == "Ctenochaetus binotatus" | 
+           Species_2 == "Centropyge heraldi")
+```
+
+```{r}
+ord_species_depth2 <- ord_species_depth2 |> 
+  mutate(Depth_categorical = factor(Depth_categorical, 
+                                    levels = c("Shallow",
+                                    "Upper_meso",
+                                    "Lower_meso")))
+```
+
+# Standard error of the mean
+
+```{r}
+std_error <- function(x) sd(x)/sqrt(length(x))
+```
+
+
+# Manual color vector
+
+```{r}
+group_colors <- c(Shallow = "#8AA17D", 
+                  Upper_meso = "#929FBD",
+                  Lower_meso = "#E29297")
+```
+
+# Summary statistics
+
+```{r}
+ord_depth_supp <- 
+ord_species_depth2 |> 
+  group_by(Species_2,
+           Depth_categorical) |> 
+  dplyr::summarise(Mean = mean(Number),
+                   STDError = std_error(Number)) |> 
+  ggplot(aes(x = Depth_categorical,
+             y = Mean, 
+         color = Depth_categorical)) +
+  geom_pointrange(aes(ymin = Mean - STDError,
+                      ymax = Mean + STDError)) +
+  facet_wrap(~ Species_2,
+             scales = "free") +
+  theme_classic() +
+  ylab(expression(Abundance~(ind.150m^-2))) +
+  xlab("") +
+  scale_color_manual(values = group_colors) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(color = "Depth group")
+```
+
+
+# ggsave
+
+```{r}
+ggsave("Fig. S2. Ord_depth_supp.jpeg",
+       plot = ord_depth_supp,
+       dpi = 600,
+       height = 5,
+       width = 7,
+       units = "in")
+```
+
+

@@ -1,0 +1,1799 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse)
+library(rstanarm)
+library(brms)
+library(coda)
+library(bayesplot)
+library(DHARMa)
+library(emmeans)
+library(broom)
+library(tidybayes)
+library(ggeffects)
+library(broom.mixed)
+library(bayestestR)
+library(see)
+library(easystats)
+library(patchwork)
+library(ggridges)
+source("helperFunctions.R")
+library(ggimage)
+```
+
+# Read and prepare data
+
+```{r}
+fish_biom <- read_csv("Data/CSV_FunctionalGroup_Biomass_Version2.csv",
+                      trim_ws = TRUE)
+```
+
+## Select relevant columns
+
+```{r}
+fish_biom |> glimpse()
+```
+
+```{r}
+fish_biom2 <- fish_biom |> 
+  select(Site, 
+         Depth_m, 
+         Habitat_simplified,
+         Aspect_descriptive,
+         browser,
+         cropper,
+         detritivore,
+         excavator,
+         scraper)
+```
+
+## add all herbivores
+
+```{r}
+fish_biom3 <-
+fish_biom2 |> 
+  mutate(All_herbs = cropper + 
+           scraper + 
+           detritivore +
+           excavator +
+           browser) |> 
+  drop_na()
+```
+
+## declare factors
+
+```{r}
+fish_biom3 <- 
+fish_biom3 |> 
+  mutate(Site = factor(Site),
+         Aspect_descriptive = factor(Aspect_descriptive),
+         Habitat_simplified = factor(Habitat_simplified))
+```
+
+# HERBIVORES
+
+## data prep
+
+```{r}
+herbs_nz <-
+  fish_biom3 |> 
+  filter(All_herbs > 0) |> 
+  droplevels()
+```
+
+## Define formula
+
+```{r}
+herbs_form_b <- bf(All_herbs ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) +
+                     (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+herbs_nz |> 
+  #group_by(Aspect_descriptive,
+   #        Depth_m) |> 
+  summarise(median = log(median(All_herbs)),
+            mad = log(mad(All_herbs))) 
+```
+```{r}
+7/7.2
+```
+
+
+## prior definition
+
+```{r}
+herbs_priors_b <- prior(normal(7, 7.2), class = "Intercept") +
+  prior(normal(0, 1), class = "b") +
+  prior(student_t(3, 0, 7.2), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior only model
+
+```{r}
+herb_prior_mod_b <- brm(herbs_form_b,
+                    data = herbs_nz,
+                    prior = herbs_priors_b,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior only mod
+
+```{r}
+herb_prior_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## fit model
+
+```{r}
+#| cache: true
+herbs_mod_b <- update(herb_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plots
+
+```{r}
+herbs_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() 
+```
+
+## mcmc diagnostics
+
+### traceplots
+
+```{r}
+par_herbs_b <- herbs_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+herbs_mod_b |> mcmc_plot(type = "trace",
+                         par = par_herbs_b)
+```
+
+### autocorrelation
+
+```{r}
+herbs_mod_b |> mcmc_plot(type = "acf_bar",
+                         par = par_herbs_b)
+```
+
+### rhat/ess
+
+```{r}
+herbs_mod_b   |> mcmc_plot(type = "rhat_hist")
+herbs_mod_b  |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+herbs_resid_b <- make_brms_dharma_res(herbs_mod_b)
+```
+
+## qqplot
+
+```{r}
+herbs_resid_b  |> testUniformity()
+```
+
+## residuals
+
+```{r}
+herbs_resid_b  |> plotResiduals(quantreg = FALSE)
+```
+
+# ALL HERBS RESULTS
+
+```{r}
+herbs_mod_b  |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# CROPPERS
+
+## data prep
+
+```{r}
+crop_nz <-
+  fish_biom3 |> 
+  filter(cropper > 0) |> 
+  droplevels()
+```
+
+## define formula
+
+```{r}
+crop_form_b <- bf(cropper ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) +
+                    (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+crop_nz |> 
+  group_by(Aspect_descriptive,
+           Depth_m) |> 
+  summarise(median = log(median(cropper)),
+            mad = log(mad(cropper))) |>
+  arrange(-median)
+```
+
+```{r}
+5.2/5.5
+```
+
+
+## prior definition
+
+```{r}
+crop_prior_b <- prior(normal(5.1, 4.4), class = "Intercept") +
+  prior(normal(0, 4.5), class = "b") +
+  prior(student_t(3, 0, 4.4), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior model
+
+```{r}
+crop_prior_mod_b <- brm(crop_form_b,
+                    data = crop_nz,
+                    prior = crop_prior_b,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior model
+
+```{r}
+crop_prior_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
+
+## crop model
+
+```{r}
+#| cache: true
+crop_mod_b <- update(crop_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plot
+
+```{r}
+crop_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() 
+```
+
+## mcmc diagnostics
+
+### trace
+
+```{r}
+par_crop <- crop_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+crop_mod_b |> mcmc_plot(type = "trace",
+                         par = par_crop)
+```
+
+### autocorrelation
+
+-   These look okay
+
+```{r}
+crop_mod_b |> mcmc_plot(type = "acf_bar",
+                         par = par_crop)
+```
+
+### rhat and ess
+
+-   rhat and ess look okay
+
+```{r}
+crop_mod_b  |> mcmc_plot(type = "rhat_hist")
+crop_mod_b  |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+crop_resids_b <- make_brms_dharma_res(crop_mod_b)
+```
+
+## qqplot
+
+```{r}
+crop_resids_b |> testUniformity()
+```
+
+-   looks generally okay
+
+## residuals
+
+```{r}
+crop_resids_b |> plotResiduals(quantreg = FALSE)
+```
+
+# CROPPER RESULTS
+
+```{r}
+crop_mod_b |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+    filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# DETRITIVORES
+
+## data prep
+
+```{r}
+det_nz <-
+  fish_biom3 |> 
+  filter(detritivore > 0) |> 
+  droplevels()
+```
+
+## def formula
+
+```{r}
+det_form_b <- bf(detritivore ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) + 
+                   (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+det_nz |> 
+  group_by(Aspect_descriptive,
+           Depth_m) |> 
+  summarise(median = log(median(detritivore)),
+            mad = log(mad(detritivore))) |>
+  arrange(-median)
+```
+
+## Prior definition
+
+```{r}
+det_priors_b <- prior(normal(5, 4.3), class = "Intercept") +
+  prior(normal(0, 4.3), class = "b") +
+  prior(student_t(3, 0, 4.3), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior only model
+
+```{r}
+det_prior_mod_b <- brm(det_form_b,
+                    data = det_nz,
+                    prior = det_priors_b ,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior
+
+```{r}
+det_prior_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
+
+## fit model
+
+```{r}
+#| cache: true
+det_mod_b <- update(det_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plot
+
+```{r}
+det_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() 
+```
+
+## mcmc diagnostics
+
+### trace
+
+```{r}
+par_det <- det_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+det_mod_b |> mcmc_plot(type = "trace",
+                         par = par_det)
+```
+
+### autocorrelation
+
+-   These look okay
+
+```{r}
+det_mod_b |> mcmc_plot(type = "acf_bar",
+                         par =par_det)
+```
+
+### rhat/ess
+
+```{r}
+det_mod_b  |> mcmc_plot(type = "rhat_hist")
+det_mod_b |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+det_resids_b <- make_brms_dharma_res(det_mod_b)
+```
+
+### qqplot
+
+```{r}
+det_resids_b |> testUniformity()
+```
+
+## residuals
+
+```{r}
+det_resids_b|> plotResiduals(quantreg = FALSE)
+```
+
+# DETRITIVORE RESULTS
+
+```{r}
+det_mod_b |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+    filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# SCRAPER
+
+## data prep
+
+```{r}
+scra_nz <-
+  fish_biom3 |> 
+  filter(scraper > 0) |> 
+  droplevels()
+```
+
+## define form
+
+```{r}
+scra_form_b <- bf(scraper ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) + 
+                    (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+scra_nz |> 
+  group_by(Aspect_descriptive) |> 
+  summarise(median = log(median(scraper)),
+            mad = log(mad(scraper))) |>
+  arrange(-median)
+```
+
+## prior definition
+
+```{r}
+scra_prior_b <- prior(normal(6, 5.5), class = "Intercept") +
+  prior(normal(0, 1.5), class = "b") +
+  prior(student_t(3, 0, 5.5), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior model
+
+```{r}
+scra_prior_mod_b <- brm(scra_form_b,
+                    data = scra_nz,
+                    prior = scra_prior_b,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior
+
+```{r}
+scra_prior_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
+
+## fit model
+
+```{r}
+#| cache: true
+scra_mod_b <- update(scra_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+
+## mcmc diagnostic
+
+### trace
+
+```{r}
+par_scra_b <- scra_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+scra_mod_b |> mcmc_plot(type = "trace",
+                         par = par_scra_b)
+```
+
+### autocorr
+
+```{r}
+scra_mod_b |> mcmc_plot(type = "acf_bar",
+                         par = par_scra_b)
+```
+
+### rhat/ess
+
+```{r}
+scra_mod_b  |> mcmc_plot(type = "rhat_hist")
+scra_mod_b |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+scra_resids_b <- make_brms_dharma_res(scra_mod_b )
+```
+
+### qqplot
+
+```{r}
+scra_resids_b  |> testUniformity()
+```
+
+### residuals
+
+```{r}
+scra_resids_b |> plotResiduals()
+```
+
+# SCRAPER RESULTS
+
+```{r}
+scra_mod_b |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+    filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+- no difference in biomass with depth
+
+# EXCAVATORS
+
+## data prep
+
+```{r}
+exc_nz <-
+  fish_biom3 |> 
+  filter(excavator > 0) |> 
+  droplevels()
+```
+
+## def formula
+
+```{r}
+exc_form_b <- bf(excavator ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) + 
+                   (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+exc_nz |> 
+  group_by(Aspect_descriptive) |> 
+  summarise(median = log(median(excavator)),
+            mad = log(mad(excavator))) |>
+  arrange(-median)
+```
+
+## prior definition
+
+```{r}
+exc_priors_b <- prior(normal(5.5, 6), class = "Intercept") +
+  prior(normal(0, 2), class = "b") +
+  prior(student_t(3, 0, 6), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior model
+
+```{r}
+exc_prior_mod_b <- brm(exc_form_b,
+                    data = exc_nz,
+                    prior = exc_priors_b,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior
+
+```{r}
+exc_prior_mod_b  |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
+
+## fit model
+
+```{r}
+#| cache: true
+exc_mod_b <- update(exc_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## mcmc diagnostics
+
+### trace
+
+```{r}
+par_exc_b <- exc_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+exc_mod_b|> mcmc_plot(type = "trace",
+                         par = par_exc_b )
+```
+
+### autocorrelation
+
+```{r}
+exc_mod_b |> mcmc_plot(type = "acf_bar",
+                         par = par_exc_b)
+```
+
+### rhat/ess
+
+```{r}
+exc_mod_b |> mcmc_plot(type = "rhat_hist")
+exc_mod_b |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+exc_resids_b <- make_brms_dharma_res(exc_mod_b)
+```
+
+### qqplot
+
+```{r}
+exc_resids_b  |> testUniformity()
+```
+
+### resid
+
+```{r}
+exc_resids_b |> plotResiduals()
+```
+
+# EXCAVATOR RESULTS
+
+```{r}
+exc_mod_b|> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+    filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# BROWSERS
+
+## data prep
+
+```{r}
+brow_nz <-
+  fish_biom3 |> 
+  filter(browser > 0) |> 
+  droplevels()
+```
+
+## Define formula
+
+```{r}
+brow_form_b <- bf(browser ~ Depth_m + 
+                      Aspect_descriptive + 
+                      (1 | Site) +
+                    (1 | Habitat_simplified),
+                    family = Gamma(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fish_biom3 |> 
+  group_by(Aspect_descriptive,
+           Depth_m) |> 
+  summarise(median = log(median(browser)),
+            mad = log(mad(browser))) |>
+  arrange(-median)
+```
+
+## prior definition
+
+```{r}
+brow_priors_b <- prior(normal(5.8, 6.2), class = "Intercept") +
+  prior(normal(0, 1.4), class = "b") +
+  prior(student_t(3, 0, 6.2), class = "sd") +
+  prior(gamma(0.01, 0.01), class = "shape")
+```
+
+## prior model
+
+```{r}
+brow_prior_mod_b <- brm(brow_form_b ,
+                    data =brow_nz,
+                    prior = brow_priors_b,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval prior model
+
+```{r}
+brow_prior_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() &
+  scale_y_log10()
+```
+
+## fit browser model
+
+```{r}
+#| cache: true
+brow_mod_b <- update(brow_prior_mod_b,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plots
+
+```{r}
+brow_mod_b |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() 
+```
+
+## mcmc diagnostics
+
+### trace
+
+```{r}
+par_brow_b <- brow_mod_b |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+brow_mod_b |> mcmc_plot(type = "trace",
+                         par = par_brow_b)
+```
+
+### autocor
+
+```{r}
+brow_mod_b |> mcmc_plot(type = "acf_bar",
+                         par = par_brow_b)
+```
+
+### rhat/ess
+
+```{r}
+brow_mod_b |> mcmc_plot(type = "rhat_hist")
+brow_mod_b|> mcmc_plot(type = "neff_hist")
+```
+
+## dharma
+
+```{r}
+brow_resids_b <- make_brms_dharma_res(brow_mod_b)
+```
+
+### qqplot
+
+```{r}
+brow_resids_b |> testUniformity()
+```
+
+### resids
+
+```{r}
+brow_resids_b |> plotResiduals(quantreg = FALSE)
+```
+
+# BROWSER RESULTS
+
+```{r}
+brow_mod_b |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+    filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# DEPTH PLOTS
+
+## herbs biomass newdata
+
+```{r}
+depth_b_newdata <- with(herbs_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## herbs biomass predictions
+
+```{r}
+herbs_b_depth_pred <- herbs_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## herbs biomass plot
+
+```{r}
+p_depth_allherbs_B <-
+herbs_b_depth_pred |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = herbs_nz,
+             aes(y = All_herbs),
+             size = 2.5, 
+             shape = 21,
+             color = "#8AA17D",
+             fill = "#8AA17D",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#8AA17D") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#8AA17D",
+              color = "#8AA17D",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                       limits = c(0, 24000),
+  breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+     #theme(axis.title.x=element_blank(),
+      #  axis.text.x=element_blank(),
+       # axis.ticks.x=element_blank()) +
+  ggtitle("Total herbivores") +
+    geom_image(data = tibble(Depth_m = 90,
+                           response = 23000),
+             aes(image = ("All_herbs.png")),
+             size = 0.30) +
+  theme(legend.position = "none")
+```
+
+## brow biomass newdata
+
+```{r}
+depth_b_brow_newdata <- with(brow_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## brow biomass predict
+
+```{r}
+brow_depth_pred_B <- brow_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_brow_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## brow biomass plot
+
+```{r}
+p_depth_brow_B <- 
+brow_depth_pred_B |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = brow_nz,
+             aes(y = browser),
+             size = 2.5,
+             shape = 21,
+             color = "#929FBD",
+             fill = "#929FBD",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#929FBD") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#929FBD",
+              color = "#929FBD",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 24000),
+    breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 57,
+                           response = 23000),
+             aes(image = "naso.png"),
+             size = 0.30) +
+  ggtitle("Browsers")
+```
+
+## crop biomass newdata
+
+```{r}
+depth_b_crop_newdata <- with(crop_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## crop biomass predict
+
+```{r}
+crop_depth_pred_B <- crop_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_crop_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## crop plot biomass
+
+```{r}
+p_depth_crop_B <- 
+crop_depth_pred_B |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = crop_nz,
+             aes(y = cropper),
+             size = 2.5,
+             shape = 21,
+             color = "#DDD487",
+             fill = "#DDD487",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#DDD487") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#DDD487",
+              color = "#DDD487",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                       limits = c(0, 24000),
+    breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 80, by = 20)) +
+  theme_classic() +
+   #theme(axis.title.x=element_blank(),
+    #    axis.text.x=element_blank(),
+     #   axis.ticks.x=element_blank()) +
+  geom_image(data = tibble(Depth_m = 75,
+                           response = 23000),
+             aes(image = "siganid.png"),
+             size = 0.30) +
+  ggtitle("Croppers")
+```
+
+
+## det biomass newdata
+
+```{r}
+depth_b_det_newdata <- with(det_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## det biomass predict
+
+```{r}
+det_depth_pred_B <- det_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_det_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## det biomass plot
+
+```{r}
+p_depth_det_B <- 
+det_depth_pred_B |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = det_nz,
+             aes(y = detritivore),
+             size = 2.5,
+             shape = 21,
+             color = "#BFB59E",
+             fill = "#BFB59E",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#BFB59E") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#BFB59E",
+              color = "#BFB59E",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 24000),
+    breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 80, by = 20)) +
+  theme_classic() +
+   theme(
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 65,
+                           response = 23000),
+             aes(image = "ctenochaetus.png"),
+             size = 0.30) +
+  ggtitle("Detritivores")
+```
+
+
+## exc biomass newdata
+
+```{r}
+depth_b_exc_newdata <- with(exc_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## exc biomass predict
+
+```{r}
+exc_depth_pred_B <- exc_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_exc_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+
+## exc biomass plot
+
+```{r}
+p_depth_exc_B <- 
+exc_depth_pred_B |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = exc_nz,
+             aes(y = excavator),
+             size = 2.5,
+             shape = 21,
+             color = "#E29297",
+             fill = "#E29297",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#E29297") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#E29297",
+              color = "#E29297",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                       limits = c(0, 24000),
+    breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "Depth (m)",
+                     breaks = seq(0, 80, by = 20)) +
+  theme_classic() +
+   #theme(axis.title.x=element_blank(),
+   #     axis.text.x=element_blank(),
+    #    axis.ticks.x=element_blank()) +
+        #axis.ticks.y = element_blank(),
+        #axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 63,
+                           response = 23000),
+             aes(image = "cholurus.png"),
+             size = 0.30) +
+  ggtitle("Excavators")
+```
+
+
+## scra biomass newdata
+
+```{r}
+depth_b_scra_newdata <- with(scra_nz,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## scra biomass predict
+
+```{r}
+scra_depth_pred_B <- scra_mod_b |> 
+  emmeans(~ Depth_m, 
+          at = depth_b_scra_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## scra plot
+
+```{r}
+p_depth_scra_B <- 
+scra_depth_pred_B  |> 
+  ggplot(aes(y = response,
+             x = Depth_m)) +
+    geom_point(data = scra_nz,
+             aes(y = scraper),
+             size = 2.5,
+             shape = 21,
+             color = "#BFAECF",
+             fill = "#BFAECF",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#BFAECF") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#BFAECF",
+              color = "#BFAECF",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 24000),
+    breaks = seq(0, 30000, by = 12000)) +
+  scale_x_continuous(name = "Depth (m)",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           response = 23000),
+             aes(image = "scarus.png"),
+             size = 0.30) +
+  ggtitle("Scrapers")
+```
+
+# patchwork biomass
+```{r}
+p_biomass_depth <- 
+(p_depth_allherbs_B + p_depth_brow_A) /
+(p_depth_crop_B + p_depth_det_B) /
+(p_depth_exc_B + p_depth_scra_B) +
+  plot_annotation(tag_levels = "a")
+```
+
+
+# depth biomass ggsave
+
+```{r}
+ggsave("Fig. X5.depth biomass.jpeg",
+       plot = p_biomass_depth, 
+       dpi = 600, 
+       height = 8.5, 
+       width = 8.5, 
+       units = "in")
+```
+
+# SLOPE PLOTS
+
+## herbs slope newdata
+
+```{r}
+herbs_nd_slope_b <- emmeans(herbs_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_allherbs_B <- 
+herbs_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#8AA17D",
+                  fill = "#8AA17D") +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                     limits = c(0, 10000),
+                     breaks = seq(0, 10000, by = 2000)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Total herbivores") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 9500),
+             aes(image = "All_herbs.png"),
+             size = 0.30)
+```
+
+### pairwise
+
+```{r}
+herbs_mod_b |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## brow slope newdata
+
+```{r}
+brow_nd_slope_b <- emmeans(brow_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+### pairwise
+
+```{r}
+brow_mod_b |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_brow_B <- 
+brow_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#929FBD",
+                  fill = "#929FBD") +
+  scale_y_continuous(name = "",
+                     limits = c(0, 35000),
+                     breaks = seq(0, 35000, by = 10000)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Browsers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 35000),
+             aes(image = "naso.png"),
+             size = 0.30)
+```
+
+## crop slope newdata
+
+```{r}
+crop_nd_slope_b <- emmeans(crop_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+
+## plot predicted values of slope
+
+```{r}
+p_slope_crop_B <- 
+crop_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#DDD487",
+                  fill = "#DDD487") +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                     limits = c(0, 10000),
+                     breaks = seq(0, 10000, by = 2000)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Croppers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 9500),
+             aes(image = "siganid.png"),
+             size = 0.30)
+```
+
+### pairwise
+
+```{r}
+crop_mod_b |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## det biomass newdata
+
+```{r}
+det_nd_slope_b <- emmeans(det_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_det_B <- 
+det_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#8AA17D",
+                  fill = "#8AA17D") +
+  scale_y_continuous(name = "",
+                     limits = c(0, 2000),
+                     breaks = seq(0, 2000, by = 500)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Detritivores") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 1900),
+             aes(image = "ctenochaetus.png"),
+             size = 0.30)
+```
+
+### pairwise
+
+```{r}
+det_mod_b |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## exc newdata
+
+```{r}
+exc_nd_slope_b <- emmeans(exc_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_exc_b <- 
+exc_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#E29297",
+                  fill = "#E29297") +
+  scale_y_continuous(expression(Biomass~kg~(ind.150m^-2)),
+                     limits = c(0, 30000),
+                     breaks = seq(0, 30000, by = 10000)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+    # theme(axis.title.x=element_blank(),
+     #   axis.text.x=element_blank(),
+      #  axis.ticks.x=element_blank()) +
+  ggtitle("Excavators") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 29000),
+             aes(image = "cholurus.png"),
+             size = 0.30)
+```
+
+## scra newdata
+
+```{r}
+scra_nd_slope_b <- emmeans(scra_mod_b,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_scra_b <- 
+scra_nd_slope_b |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = response)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#BFAECF",
+                  fill = "#BFAECF") +
+  scale_y_continuous(Abundance~(ind.150m^-2),
+                     limits = c(0, 10000),
+                     breaks = seq(0, 10000, by = 2000)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.y=element_blank(),
+       # axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) +
+  ggtitle("Scrapers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           response = 9700),
+             aes(image = "scarus.png"),
+             size = 0.30)
+```
+
+# patchwork biomass
+```{r}
+p_slope_biomass <- 
+(p_slope_allherbs_B + p_slope_brow_B) /
+(p_slope_crop_B + p_slope_det_B) /
+(p_slope_exc_b + p_slope_scra_b ) +
+  plot_annotation(tag_levels = "a")
+```
+
+
+# slope ggsave
+
+```{r}
+ggsave("Fig. X6. Biomass slope.jpeg",
+       plot =p_slope_biomass, 
+       dpi = 600, 
+       height = 8.5, 
+       width = 11.5, 
+       units = "in")
+```
+
+# DOTPLOTS
+
+## read csv
+
+```{r}
+fish_len <- read_csv("Data/CSV_FunctionalGroup_Length_cm.csv",
+                      trim_ws = TRUE)
+```
+
+## Standard error of the mean
+
+```{r}
+std_error <- function(x) sd(x)/sqrt(length(x))
+```
+
+## Manual color vector
+
+```{r}
+group_colors <- c(Shallow = "#8AA17D", 
+                  Upper_meso = "#929FBD",
+                  Lower_meso = "#E29297")
+```
+
+## isolate scrapers, excavators, browsers
+
+```{r}
+fish_len2 <- fish_len |> 
+  select(Site, 
+         Depth_m, 
+         Depth_group,
+         #Depth_group2,
+         #Habitat_simplified,
+         Aspect_descriptive,
+         browser,
+         `cropper/grazer`,
+         detritivore,
+         excavator,
+         scraper) |> 
+  rename(cropper = `cropper/grazer`)
+```
+
+## arrange levels for depth group
+
+```{r}
+fish_len2 <- fish_len2 |> 
+  mutate(
+         Depth_group = factor(Depth_group,
+                              levels = c("10m",
+                                       "20m",
+                                       "30m",
+                                       "40m",
+                                       "50m",
+                                       "60m",
+                                       "70m",
+                                       "80m",
+                                       "90m",
+                                       "100m")))
+```
+
+
+## pivot longer
+
+```{r}
+fish_len2_long <- fish_len2 |> 
+  pivot_longer(cols = c("browser",
+                        "cropper",
+                        "detritivore",
+                        "excavator",
+                        "scraper"),
+               names_to = "functional_group",
+               values_to = "length_cm")
+```
+
+
+```{r}
+fish_len2_long_nz <- 
+  fish_len2_long |> 
+  filter(length_cm > 0) |> 
+  droplevels()
+```
+
+## summary stats and supp fig
+
+```{r}
+f_length_parrot <- 
+fish_len2_long_nz |> 
+  group_by(Depth_group,
+           functional_group) |> 
+  dplyr::summarise(Mean = mean(length_cm),
+                   STDError = std_error(length_cm)) |> 
+  ggplot(aes(x = Depth_group,
+             y = Mean, 
+         color = Depth_group)) +
+  geom_pointrange(aes(ymin = Mean - STDError,
+                      ymax = Mean + STDError)) +
+  facet_wrap(~ functional_group,
+             scales = "free") +
+  theme_classic() +
+  ylab(expression(Length~(cm.150m^-2))) +
+  xlab("") +
+  #scale_color_manual(values = group_colors) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  labs(color = "Depth group")
+```
+
+```{r}
+ggsave("Fig. S3. Mean size of parrotfishes.jpeg",
+       plot =f_length_parrot, 
+       dpi = 600, 
+       height = 4, 
+       width = 6, 
+       units = "in")
+```

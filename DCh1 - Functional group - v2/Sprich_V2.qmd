@@ -1,0 +1,604 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# BAYESIAN SPECIES RICHNESS
+
+# Load libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse)
+#library(rstanarm)
+library(brms)
+library(coda)
+library(bayesplot)
+library(DHARMa)
+library(emmeans)
+library(broom)
+library(tidybayes)
+library(ggeffects)
+library(broom.mixed)
+library(bayestestR)
+library(see)
+library(easystats)
+library(patchwork)
+library(ggridges)
+source("helperFunctions.R")
+library(ggimage)
+library(vegan)
+library(BiodiversityR)
+library(ggrepel)
+```
+
+# Read and prepare data
+
+-   Other dataset has the rawdata that was plugged into the iNEXT commands
+
+```{r}
+fish_sprich <- read_csv("Data/CSV_SpRich_iNEXT_EstAsymp.csv",
+                      trim_ws = TRUE)
+```
+
+## Remove columns that are of no interest
+
+```{r}
+fish_sprich2 <- 
+fish_sprich|> select(-Site_Depth,
+                      -Observed,
+                      -s.e.,
+                      -LCL,
+                      -UCL,
+                    #  -Habitat_simplified,
+                      -Diversity)
+```
+
+## Declare factors
+
+```{r}
+fish_sprich2 <- fish_sprich2 |> 
+                      mutate(Site = factor(Site),
+                      Aspect_descriptive = factor(Aspective_descriptive)) |> 
+  select(-Aspective_descriptive)
+```
+# Model fitting
+
+## Define formula
+
+```{r}
+sprich_form <- bf(Estimator ~ Depth +
+                          Aspect_descriptive + 
+                          (1 | Site) +
+                          (1 | Habitat_simplified),
+                        family = lognormal())
+```
+
+## Prior exploration
+
+```{r}
+fish_sprich2 |> 
+  #group_by(Aspect_descriptive,
+  #         Depth) |> 
+  summarise(median = log(median(Estimator)),
+            mad = log(mad(Estimator))) #|> 
+  #arrange(-mad)
+```
+## Prior definition
+
+```{r}
+priors_sprich <- prior(normal(1.3, 1.4), class = "Intercept") +
+  prior(normal(0, 1.1), class = "b") +
+  prior(student_t(3, 0, 1.4), class = "sigma") +
+  prior(student_t(3, 0, 1.4), class = "sd")
+```
+
+## Prior only model
+
+```{r}
+prior_mod_sprich <- brm(sprich_form,
+                    data = fish_sprich2,
+                    prior = priors_sprich,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## Prior evaluation
+
+```{r}
+prior_mod_sprich |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+# Fit model
+
+```{r}
+#| cache: true
+sprich_mod <- update(prior_mod_sprich,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+# Partial plots
+
+```{r}
+sprich_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+# MCMC diagnonistics
+
+```{r}
+par_sprich_mod <- sprich_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+## trace
+
+```{r}
+ sprich_mod |> mcmc_plot(type = "trace",
+                         par = par_sprich_mod)
+```
+
+## autocorr
+
+```{r}
+ sprich_mod |> mcmc_plot(type = "acf_bar",
+                         par = par_sprich_mod)
+```
+
+## rhat/ess
+
+```{r}
+sprich_mod  |> mcmc_plot(type = "rhat_hist")
+sprich_mod  |> mcmc_plot(type = "neff_hist")
+```
+
+# DHARMA
+
+## run DHARMA
+
+```{r}
+sprich_resids <- make_brms_dharma_res(sprich_mod)
+```
+
+## qqplot/resids
+
+```{r}
+sprich_resids |> testUniformity()
+sprich_resids |> plotResiduals(quantreg = TRUE)
+```
+
+# RESULTS
+
+```{r}
+sprich_mod  |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# PLOTS
+
+## Depth newdata
+
+```{r}
+sprich_newdata <- with(fish_sprich2,
+                       data.frame(Depth = seq(min(Depth),
+                                              max(Depth),
+                                              length = 100)))
+```
+
+## predict values for depth
+
+```{r}
+sprich_pred_depth <- sprich_mod |> 
+  emmeans(~ Depth, 
+          at = sprich_newdata, 
+          type = "link") |> 
+  gather_emmeans_draws() |> 
+  mutate(Exp_sprich = exp(.value)) |> 
+  dplyr::select(-.chain,
+                -.iteration,
+                -.value) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi) |> 
+  as.data.frame()
+```
+
+## plot depth
+
+```{r}
+p_sprich_depth <-
+sprich_pred_depth |> 
+  ggplot(aes(y = median,
+             x = Depth)) +
+    geom_point(data = fish_sprich2,
+             aes(y = Estimator),
+             size = 2.5, 
+             shape = 21,
+             color = "#8AA17D",
+             fill = "#8AA17D",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#8AA17D") +
+  geom_ribbon(aes(ymin = lower,
+                  ymax = upper),
+              fill = "#8AA17D",
+              color = "#8AA17D",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Species~richness~(ind.150m^-2)),
+                       limits = c(0, 30),
+  breaks = seq(0, 30, by = 10)) +
+  scale_x_continuous(name = "Depth (m)",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+     #theme(axis.title.x=element_blank(),
+      #  axis.text.x=element_blank(),
+       # axis.ticks.x=element_blank()) +
+  ggtitle("Total herbivores") +
+    geom_image(data = tibble(Depth = 90,
+                           median = 29),
+             aes(image = ("All_herbs.png")),
+             size = 0.30) +
+  theme(legend.position = "none")
+```
+
+## predict values for slope
+
+```{r}
+sprich_slope <- sprich_mod |> 
+  emmeans(~ Aspect_descriptive, 
+          type = "link") |> 
+  gather_emmeans_draws() |> 
+  mutate(Exp_sprich = exp(.value)) |> 
+  dplyr::select(-.chain,
+                -.iteration,
+                -.value) |> 
+  summarise_draws(median, 
+                  HDInterval::hdi) |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+sprich_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot slope
+
+```{r}
+p_sprich_slope <- 
+sprich_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = median)) +
+  geom_pointrange(aes(ymin = lower,
+                      ymax = upper),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#8AA17D",
+                  fill = "#8AA17D") +
+  scale_y_continuous(Species~richness~(ind.150m^-2),
+                     limits = c(0, 8),
+                     breaks = seq(0, 8, by = 2)) +
+  scale_x_discrete(name = "Slope orientation") +
+  theme_classic()
+```
+
+
+# MULTIVARIATE
+
+# Load libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse)
+library(patchwork)
+library(vegan)
+library(BiodiversityR)
+library(ggrepel)
+library(ggforce)
+```
+
+# Read and prepare data
+
+```{r}
+Abun_ord <- read_csv("Data/Species_Ordination_Compressed.csv", 
+                     trim_ws = TRUE)
+```
+
+# Prepare env matrix
+
+```{r}
+Abun_env <- Abun_ord |>  select(Site, 
+                   Depth_Group2, 
+                   Aspect_descriptive2)
+```
+
+# Prepare species matrix
+
+```{r}
+Abun_spec <- Abun_ord |>  select(-Site, 
+                   -Depth_Group2, 
+                   -Aspect_descriptive,
+                   -Aspect_descriptive2)
+```
+
+
+# Data standardisation (wisconsin and fourth root)
+
+```{r}
+abun_stand <- wisconsin(Abun_spec^0.25)
+```
+
+# Run CAP
+
+```{r}
+#| cache: true
+abun_cap <- capscale(abun_stand ~ Depth_Group2 +
+                       Aspect_descriptive2, 
+                     data = Abun_env, 
+                     distance = "bray",
+                     sqrt.dist = FALSE)
+```
+
+# Prelim plot
+
+```{r}
+plot_cap <- abun_cap |> ordiplot(choices=c(1,2))
+```
+
+# Calculate sum of abundance per site/row to scale size of dot to abundance
+
+```{r}
+Abun_spec2 <- rowSums(Abun_spec)
+
+Abun_env <- cbind(Abun_env, 
+                  Abun_spec2)
+```
+
+# Extract scores
+
+```{r}
+scores <- sites.long(plot_cap, 
+                     env.data = Abun_env)
+```
+
+# Plot ordination
+
+```{r}
+p_ord1 <- 
+ggplot() +
+  geom_point(data = scores, 
+             aes(x = axis1,
+                 y = axis2,
+             color = Depth_Group2,
+             size = Abun_spec2)) +
+  scale_color_manual(values = c("Shallow" = "#8AA17D",
+                                "Upper_meso" = "#929FBD",
+                                "Lower_meso" = "#E29297")) +
+  geom_hline(yintercept = 0,
+             linetype = "dashed") +
+  geom_vline(xintercept = 0,
+             linetype = "dashed") +
+  theme_classic()
+```
+
+# Adding layers (plot ordination)
+
+```{r}
+spcomm <- 
+p_ord1 +
+  scale_fill_discrete(breaks = c("Shallow",
+                                 "Upper_meso",
+                                 "Lower_meso")) +
+  guides(size = "none",
+         color = "none", 
+         fill = guide_legend("Depth group")) +
+  geom_mark_hull(data = scores,
+                 aes(x = axis1,
+                     y = axis2,
+                     fill = Depth_Group2),
+                 concavity = 20,
+                 expand = 0) +
+  scale_x_continuous(name = "CAP: 47.04% fitted, 4.5% total ") +
+  scale_y_continuous(name = "CAP: 26.46% fitted, 2.5% total") +
+  scale_color_manual(values = c("Shallow" = "#8AA17D",
+                                "Upper_meso" = "#929FBD",
+                                "Lower_meso" = "#E29297"))
+```
+
+# envfit
+
+```{r}
+spec_envfit <- envfit(plot_cap, 
+                      env = abun_stand,
+                      permutations = 10000)
+
+envfit_r_p <- data.frame(r = spec_envfit$vectors$r,
+                         p = spec_envfit$vectors$pvals)
+
+sp_long2 <- species.long(plot_cap, 
+             spec.data = envfit_r_p)
+
+sp_long2 <- sp_long2 |> 
+  filter(r > 0.10)
+
+sp_long2 <- 
+  sp_long2 |> mutate(labels_abb = abbreviate(labels, 2))
+```
+
+# Plot envfit on the figures
+
+```{r}
+sp_ord <- spcomm + 
+  geom_segment(data = sp_long2,
+               aes(x = 0,
+                   y = 0,
+                   xend = axis1,
+                   yend = axis2,
+                   color = "black",
+                   size = 0.5)) +
+  geom_text_repel(data = sp_long2,
+                  aes(x = axis1,
+                      y = axis2,
+                      label = labels_abb,
+                      size = 100),
+                  max.overlaps = 30)
+```
+
+# COMBINE PLOTS
+
+```{r}
+p_sprich <- p_sprich_depth /
+  p_sprich_slope /
+  sp_ord + 
+  plot_annotation(tag_levels = "a")
+```
+
+# ggsave
+
+```{r}
+ggsave("Fig. 2. Sprich.jpeg",
+       plot = p_sprich,
+       dpi = 600,
+       heigh = 10,
+       width = 8,
+       units = "in")
+```
+
+
+# PERMANOVA
+
+```{r}
+adonis2(abun_stand ~ Depth_Group2 +
+          Aspect_descriptive2, 
+        data = Abun_env,
+        perm = 10000)
+```
+
+# SUPPLEMENTARY
+
+# plot slope
+
+```{r}
+p_ord_slope1 <- 
+ggplot() +
+  geom_point(data = scores, 
+             aes(x = axis1,
+                 y = axis2,
+             color = Aspect_descriptive2,
+             size = Abun_spec2)) +
+  scale_color_manual(values = c("flat" = "#8AA17D",
+                                "slope" = "#929FBD",
+                                "wall" = "#E29297")) +
+  geom_hline(yintercept = 0,
+             linetype = "dashed") +
+  geom_vline(xintercept = 0,
+             linetype = "dashed") +
+  theme_classic() 
+```
+
+# Add layers to slope
+
+```{r}
+p_ord_slope2 <- 
+p_ord_slope1 +
+  scale_fill_discrete(breaks = c("flat",
+                                "slope",
+                                "wall")) +
+  guides(size = "none",
+         color = "none", 
+         fill = guide_legend("Slope orientation")) +
+  geom_mark_hull(data = scores,
+                 aes(x = axis1,
+                     y = axis2,
+                     fill = Aspect_descriptive2),
+                 concavity = 20,
+                 expand = 0) +
+  scale_x_continuous(name = "CAP: 47.04% fitted, 4.5% total ") +
+  scale_y_continuous(name = "CAP: 26.46% fitted, 2.5% total")
+```
+
+## add species vectors
+
+```{r}
+p_ord_slope3 <-
+p_ord_slope2 + 
+  geom_segment(data = sp_long2,
+               aes(x = 0,
+                   y = 0,
+                   xend = axis1,
+                   yend = axis2,
+                   color = "black",
+                   size = 0.5)) +
+  geom_text_repel(data = sp_long2,
+                  aes(x = axis1,
+                      y = axis2,
+                      label = labels_abb,
+                      size = 100),
+                  max.overlaps = 30)
+```
+
+
+# ggsave
+
+```{r}
+ggsave("Fig. S1. Ord_slope.jpeg",
+       plot = p_ord_slope3,
+       dpi = 600,
+       height = 2.8,
+       width = 5,
+       units = "in")
+```

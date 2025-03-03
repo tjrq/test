@@ -1,0 +1,1653 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+# Load libraries
+
+```{r}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse)
+library(rstanarm)
+library(brms)
+library(coda)
+library(bayesplot)
+library(DHARMa)
+library(emmeans)
+library(broom)
+library(tidybayes)
+library(ggeffects)
+library(broom.mixed)
+library(bayestestR)
+library(see)
+library(easystats)
+library(patchwork)
+library(ggridges)
+source("helperFunctions.R")
+library(ggimage)
+```
+
+# Read data
+
+```{r}
+fg_abun <- 
+  read_csv("Data/CSV_FunctionalGroup_Abundance.csv",
+           trim_ws = TRUE)
+```
+
+# Prepare data
+
+```{r}
+fg_abun <- 
+fg_abun |> 
+  mutate(Site = factor(Site),
+         Habitat_simplified = factor(Habitat_simplified),
+         Aspect_descriptive = factor(Aspect_descriptive)) |> 
+  select(c(-Habitat,
+           -Aspect_scale,
+           -Benthic_Complexity,
+           -cleaner,
+           -corallivore,
+           -`macro-invertivore`,
+           -`micro-invertivore`,
+           -`NA`,
+           -`pisci-invertivore`,
+           -`piscivore`,
+           -`planktivore`,
+           -spongivore,
+           -omnivore,
+           -`invertivore-sessile`,
+           -`invertivore-mobile`)) |> 
+  rename(cropper = `cropper/grazer`)
+
+levels(fg_abun$Habitat_simplified)
+```
+
+# ALL HERBIVORES
+
+## Define formula
+
+```{r}
+herbs_form <- 
+  bf(All_herbs ~ Depth_m +
+       Aspect_descriptive +
+       (1 | Site) + 
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fg_abun |> 
+  #group_by(Aspect_descriptive, 
+   #        Depth_m) |>
+  summarise(med = log(median(All_herbs)),
+            mad = log(mad(All_herbs))) |> 
+  arrange(-med)
+```
+
+```{r}
+1.1/1.5
+```
+
+
+## Define priors
+
+```{r}
+herb_priors <- prior(normal(1.2, 2), class = "Intercept") +
+  prior(normal(0, 1), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0, 2), class = "sd")
+```
+
+## Herbs prior only
+
+```{r}
+#| cache: true
+herbs_prior_mod <- brm(herbs_form,
+                    data = fg_abun,
+                    prior = herb_priors,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## Eval prior model
+
+```{r}
+herbs_prior_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+
+## Fit model
+
+```{r}
+#| cache: true
+herbs_mod <- update(herbs_prior_mod,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## Partial plot
+
+```{r}
+herbs_mod |> 
+  conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## MCMC diagnostics
+
+```{r}
+par_herbs <- herbs_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+### Trace
+
+```{r}
+herbs_mod |> mcmc_plot(type = "trace",
+                         par = par_herbs)
+```
+
+### Autocorr
+
+```{r}
+herbs_mod |> mcmc_plot(type = "acf_bar",
+                         par = par_herbs)
+```
+
+### rhat/ess
+
+```{r}
+herbs_mod |> mcmc_plot(type = "rhat_hist")
+herbs_mod |> mcmc_plot(type = "neff_hist")
+```
+
+## dharma
+
+### Resids
+
+```{r}
+herbs_resids <- make_brms_dharma_res(herbs_mod)
+```
+
+### qqplot
+
+```{r}
+herbs_resids |> testUniformity()
+```
+
+### residuals
+
+```{r}
+herbs_resids |> plotResiduals()
+```
+
+### dispersion
+
+```{r}
+herbs_resids |> testDispersion()
+```
+
+## HERBS RESULTS
+
+```{r}
+herbs_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# CROPPERS
+
+## Define formula
+
+```{r}
+crop_formula <- 
+  bf(cropper ~ Depth_m +
+       Aspect_descriptive +
+       (1| Site) +
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fg_abun |> 
+  #group_by(Depth_m,
+   #        Aspect_descriptive) |>
+  summarise(med = log(median(cropper)),
+            mad = log(mad(cropper)))
+```
+
+## Define priors
+
+```{r}
+priors_crop <- prior(normal(0.5, 2), class = "Intercept") +
+  prior(normal(0, 1), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0, 2), class = "sd")
+```
+
+## Crops prior only
+
+```{r}
+#| cache: true
+
+crop_prior_mod <- brm(crop_formula,
+                    data = fg_abun,
+                    prior = priors_crop,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## Eval prior model
+
+```{r}
+crop_prior_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+## Fit model
+
+```{r}
+#| cache: true
+crop_mod <- update(crop_prior_mod,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## MCMC diagnostics
+
+### trace
+
+```{r}
+par_crop <- crop_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+crop_mod |> mcmc_plot(type = "trace",
+                         par = par_crop)
+```
+
+### autocorr
+
+```{r}
+crop_mod  |> mcmc_plot(type = "acf_bar",
+                         par = par_crop)
+```
+
+### rhat/ess
+
+```{r}
+crop_mod |> mcmc_plot(type = "rhat_hist")
+crop_mod|> mcmc_plot(type = "neff_hist")
+```
+
+## dharma
+
+```{r}
+crop_resids <- make_brms_dharma_res(crop_mod)
+```
+
+### qqplot
+
+```{r}
+crop_resids |> testUniformity()
+```
+
+### residuals
+
+```{r}
+crop_resids |> plotResiduals()
+```
+
+### dispersion
+
+```{r}
+crop_resids |> testDispersion()
+```
+
+## CROPPER RESULTS
+
+```{r}
+crop_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1))|> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# DETRITIVORES
+
+## Define formula
+
+```{r}
+det_form <- 
+  bf(detritivore ~ Depth_m +
+       Aspect_descriptive +
+       (1 | Site) +
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fg_abun |> 
+  group_by(Depth_m,
+           Aspect_descriptive) |>
+  summarise(med = log(median(detritivore)),
+            mad = log(mad(detritivore))) |> 
+  arrange(-med)
+```
+
+## Prior definition
+
+```{r}
+det_priors <- prior(normal(0.5, 0.8), class = "Intercept") +
+  prior(normal(0, 2.2), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0 , 0.8), class = "sd")
+```
+
+## Dets prior only
+
+
+```{r}
+#| cache: true
+
+det_prior_mod <- brm(det_form,
+                    data = fg_abun ,
+                    prior = det_priors,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 1000)
+```
+
+## Eval prior model
+
+
+```{r}
+det_prior_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+## Fit model
+
+```{r}
+#| cache: true
+det_mod <- update(det_prior_mod,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## Partial plot
+
+```{r}
+det_mod |> 
+  conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## MCMC diagnostics
+
+### traceplot
+
+```{r}
+par_det <- det_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+det_mod |> mcmc_plot(type = "trace",
+                         par = par_det)
+```
+
+### autocorrelation
+
+```{r}
+det_mod  |> mcmc_plot(type = "acf_bar",
+                         par = par_det)
+```
+
+### rhat and ess
+
+```{r}
+det_mod |> mcmc_plot(type = "rhat_hist")
+det_mod  |> mcmc_plot(type = "neff_hist")
+```
+
+## dharma
+
+```{r}
+det_resids <- make_brms_dharma_res(det_mod)
+```
+
+### qqplot
+
+```{r}
+det_resids |> testUniformity()
+```
+
+### residuals
+
+```{r}
+det_resids |> plotResiduals(quantreg = FALSE)
+```
+
+### dispersion
+
+```{r}
+det_resids |> testDispersion()
+```
+
+## DETRITIVORE RESULTS
+
+```{r}
+det_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1))|> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# SCRAPERS
+
+## Define formula
+
+```{r}
+scra_form <- 
+  bf(scraper ~ Depth_m +
+       Aspect_descriptive +
+       (1| Site) +
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Explore priors
+
+```{r}
+fg_abun |> 
+  group_by(Depth_m,
+           Aspect_descriptive) |>
+  summarise(med = log(median(scraper)),
+            mad = log(mad(scraper))) |> 
+  arrange(-med)
+```
+
+## Define priors
+
+```{r}
+scra_priors <- prior(normal(2, 1), class = "Intercept") +
+  prior(normal(0, 1), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0, 1), class = "sd")
+```
+
+## Scra prior only
+
+
+```{r}
+#| cache: true
+
+scra_prior_mod <- brm(scra_form,
+                    data = fg_abun,
+                    prior = scra_priors,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## Eval prior only
+
+```{r}
+scra_prior_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+## fit model
+
+```{r}
+#| cache: true
+scra_mod <- update(scra_prior_mod,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plots
+
+```{r}
+scra_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## MCMC diagnostics
+
+### trace
+
+```{r}
+par_scra <- scra_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+scra_mod |> mcmc_plot(type = "trace",
+                         par = par_scra)
+```
+
+### autocorr
+
+```{r}
+scra_mod |> mcmc_plot(type = "acf_bar",
+                         par = par_scra)
+```
+
+### rhat/ess
+
+```{r}
+scra_mod |> mcmc_plot(type = "rhat_hist")
+scra_mod |> mcmc_plot(type = "neff_hist")
+```
+
+## dharmra
+
+```{r}
+scra_resids <- make_brms_dharma_res(scra_mod)
+```
+
+### qqplot
+
+```{r}
+scra_resids |> testUniformity()
+```
+
+## residuals
+
+```{r}
+scra_resids |> plotResiduals()
+```
+
+# SCRAPER RESULTS
+
+```{r}
+scra_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1))|> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# EXCAVATORS
+
+## Define formula
+
+```{r}
+exc_form <- 
+  bf(excavator ~ Depth_m +
+       Aspect_descriptive +
+       (1| Site) +
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fg_abun |> 
+  group_by(Depth_m,
+           Aspect_descriptive) |>
+  summarise(med = log(median(excavator)),
+            mad = log(mad(excavator))) |> 
+  arrange(-med)
+```
+
+## Prior definition
+
+```{r}
+exc_priors <- prior(normal(2.3, 2.7), class = "Intercept") +
+  prior(normal(0, 0.2), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0, 2.7), class = "sd")
+```
+
+## exc prior model
+
+```{r}
+#| cache: true
+
+exc_prior_mod <- brm(exc_form,
+                    data = fg_abun,
+                    prior = exc_priors,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## eval priors
+
+```{r}
+exc_prior_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+## exc model
+
+
+```{r}
+#| cache: true
+exc_mod <- update(exc_prior_mod,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plots
+
+```{r}
+exc_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## MCMC diagnostics
+
+### trace
+
+```{r}
+par_exc <- exc_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+exc_mod  |> mcmc_plot(type = "trace",
+                         par = par_exc)
+```
+
+### autocorr
+
+```{r}
+exc_mod |> mcmc_plot(type = "acf_bar",
+                         par = par_exc)
+```
+
+### rhat/ess
+
+```{r}
+exc_mod|> mcmc_plot(type = "rhat_hist")
+exc_mod |> mcmc_plot(type = "neff_hist")
+```
+
+## Dharma
+
+```{r}
+exc_resids <- make_brms_dharma_res(exc_mod) 
+```
+
+## qqplot
+
+```{r}
+exc_resids |> testUniformity()
+```
+
+## residuals
+
+```{r}
+exc_resids |> plotResiduals()
+```
+
+## dispersion
+
+```{r}
+exc_resids |> testDispersion()
+```
+
+# EXCAVATOR RESULTS
+
+```{r}
+exc_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1))|> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# BROWSER
+
+## define form
+
+```{r}
+brow_form <- 
+  bf(browser ~ Depth_m +
+       Aspect_descriptive +
+       (1| Site) + 
+       (1 | Habitat_simplified),
+     family = negbinomial(link = "log"))
+```
+
+## Prior exploration
+
+```{r}
+fg_abun |> 
+  group_by(Depth_m,
+           Aspect_descriptive) |>
+  summarise(med = log(median(browser)),
+            mad = log(mad(browser))) |> 
+  arrange(-med)
+```
+
+## Define prior
+
+```{r}
+brow_prior <- prior(normal(0.5, 1), class = "Intercept") +
+  prior(normal(0, 3), class = "b") +
+  prior(gamma(0.01, 0.01), class = "shape") +
+  prior(student_t(3, 0, 1), class = "sd")
+```
+
+## brow prior model
+
+```{r}
+#| cache: true
+
+brow_mod_prior <- brm(brow_form,
+                    data = fg_abun,
+                    prior = brow_prior,
+                    sample_prior = "only",
+                    iter = 5000,
+                    warmup = 1000,
+                    chains = 3,
+                    cores = 6,
+                    thin = 5,
+                    control = list(adapt_delta = 0.99,
+                                   max_treedepth = 20),
+                    refresh = 0)
+```
+
+## Evaluate priors
+
+```{r}
+brow_mod_prior  |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots() & 
+  scale_y_log10()
+```
+
+## brow model
+
+```{r}
+#| cache: true
+brow_mod <- update(brow_mod_prior,
+                  sample_prior = "yes",
+                    iter = 10000,
+                    warmup = 2000,
+                    refresh = 2000)
+```
+
+## partial plots
+
+```{r}
+brow_mod |> conditional_effects() |> 
+  plot(points = TRUE,
+       ask = FALSE,
+       plot = FALSE) |> 
+  wrap_plots()
+```
+
+## MCMC diagnostics
+
+### traceplot
+
+```{r}
+par_brow <- brow_mod |>  
+  get_variables() |> 
+  str_subset("^b_.*")
+```
+
+```{r}
+brow_mod |> mcmc_plot(type = "trace",
+                         par = par_brow)
+```
+
+### autocorrelation
+
+```{r}
+brow_mod |> mcmc_plot(type = "acf_bar",
+                         par = par_brow)
+```
+
+### rhat/ess
+
+```{r}
+brow_mod |> mcmc_plot(type = "rhat_hist")
+brow_mod |> mcmc_plot(type = "neff_hist")
+```
+
+## dharma
+
+```{r}
+brow_resids <- make_brms_dharma_res(brow_mod)
+```
+
+### qqplot
+
+```{r}
+brow_resids |> testUniformity()
+```
+
+### residuals
+
+```{r}
+brow_resids |> plotResiduals()
+```
+
+### dispersion
+
+```{r}
+brow_resids |> testDispersion()
+```
+
+# BROWSER RESULTS
+
+```{r}
+brow_mod |> as_draws_df() |> 
+  dplyr::select(matches("^b_.*")) |> 
+  exp() |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl= ~mean(.x < 1),
+                  Pg = ~mean(.x > 1))|> 
+  filter(Pl > 0.85 | 
+           Pg > 0.85)
+```
+
+# DEPTH PLOTS
+
+## newdata for depth
+
+```{r}
+depth_newdata <- with(fg_abun,
+                 data.frame(Depth_m = seq(min(Depth_m),
+                                          max(Depth_m),
+                                          length = 100)))
+```
+
+## herbs predictions
+
+```{r}
+herbs_depth_pred <- herbs_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## herbs plots
+
+```{r}
+p_depth_allherbs_A <-
+herbs_depth_pred |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = All_herbs),
+             size = 2.5, 
+             shape = 21,
+             color = "#8AA17D",
+             fill = "#8AA17D",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#8AA17D") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#8AA17D",
+              color = "#8AA17D",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Abundance~(ind.150m^-2)),
+                       limits = c(0, 60),
+  breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Total herbivores") +
+    geom_image(data = tibble(Depth_m = 90,
+                           prob = 55),
+             aes(image = ("All_herbs.png")),
+             size = 0.30) +
+  theme(legend.position = "none")
+```
+
+
+## brow predict
+
+```{r}
+brow_depth_pred <- brow_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## brow plot
+
+```{r}
+p_depth_brow_A <- 
+brow_depth_pred |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = browser),
+             size = 2.5,
+             shape = 21,
+             color = "#929FBD",
+             fill = "#929FBD",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#929FBD") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#929FBD",
+              color = "#929FBD",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 60),
+    breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           prob = 55),
+             aes(image = "naso.png"),
+             size = 0.30) +
+  ggtitle("Browsers")
+```
+
+## crop predict
+
+```{r}
+crop_depth_pred <- crop_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+
+## crop plot
+
+```{r}
+p_depth_crop_A <- 
+crop_depth_pred |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = cropper),
+             size = 2.5,
+             shape = 21,
+             color = "#DDD487",
+             fill = "#DDD487",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#DDD487") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#DDD487",
+              color = "#DDD487",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Abundance~(ind.150m^-2)),
+                       limits = c(0, 60),
+    breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           prob = 55),
+             aes(image = "siganid.png"),
+             size = 0.30) +
+  ggtitle("Croppers")
+```
+
+
+## det predict
+
+```{r}
+det_depth_pred <- det_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+
+## det plot
+
+```{r}
+p_depth_det_A <- 
+det_depth_pred |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = detritivore),
+             size = 2.5,
+             shape = 21,
+             color = "#BFB59E",
+             fill = "#BFB59E",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#BFB59E") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#BFB59E",
+              color = "#BFB59E",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 60),
+    breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           prob = 55),
+             aes(image = "ctenochaetus.png"),
+             size = 0.30) +
+  ggtitle("Detritivores")
+```
+
+
+## exc predict
+
+```{r}
+exc_depth_pred <- exc_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+
+## exc plot
+
+```{r}
+p_depth_exc_A <- 
+exc_depth_pred |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = excavator),
+             size = 2.5,
+             shape = 21,
+             color = "#E29297",
+             fill = "#E29297",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#E29297") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#E29297",
+              color = "#E29297",
+              alpha = 0.6) +
+  scale_y_continuous(expression(Abundance~(ind.150m^-2)),
+                       limits = c(0, 60),
+    breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "Depth (m)",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   #theme(axis.title.x=element_blank(),
+   #     axis.text.x=element_blank(),
+    #    axis.ticks.x=element_blank()) +
+        #axis.ticks.y = element_blank(),
+        #axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           prob = 55),
+             aes(image = "cholurus.png"),
+             size = 0.30) +
+  ggtitle("Excavators")
+```
+
+
+## scra predict
+
+```{r}
+scra_depth_pred <- scra_mod |> 
+  emmeans(~ Depth_m, 
+          at = depth_newdata, 
+          type = "response") |> 
+  as.data.frame()
+```
+
+## scra plot
+
+```{r}
+p_depth_scra_A <- 
+scra_depth_pred  |> 
+  ggplot(aes(y = prob,
+             x = Depth_m)) +
+    geom_point(data = fg_abun,
+             aes(y = scraper),
+             size = 2.5,
+             shape = 21,
+             color = "#BFAECF",
+             fill = "#BFAECF",
+             alpha = 0.3) +
+  geom_line(linewidth = 2,
+            color = "#BFAECF") +
+  geom_ribbon(aes(ymin = lower.HPD,
+                  ymax = upper.HPD),
+              fill = "#BFAECF",
+              color = "#BFAECF",
+              alpha = 0.6) +
+  scale_y_continuous(name = "",
+                       limits = c(0, 60),
+    breaks = seq(0, 60, by = 20)) +
+  scale_x_continuous(name = "Depth (m)",
+                     breaks = seq(0, 100, by = 20)) +
+  theme_classic() +
+   theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_image(data = tibble(Depth_m = 92,
+                           prob = 55),
+             aes(image = "scarus.png"),
+             size = 0.30) +
+  ggtitle("Scrapers")
+```
+
+# depth patchwork
+
+```{r}
+p_depth_abun <- 
+(p_depth_allherbs_A + p_depth_brow_A) /
+  (p_depth_crop_A + p_depth_det_A) / 
+  (p_depth_exc_A + p_depth_scra_A) +
+  plot_annotation(tag_levels = "a")
+```
+
+# depth ggsave
+
+```{r}
+ggsave("Fig. X3. Abundance depth.jpeg",
+       plot = p_depth_abun, 
+       dpi = 600, 
+       height = 8.5, 
+       width = 8.5, 
+       units = "in")
+```
+
+# SLOPE PLOTS
+
+## herbs newdata
+
+```{r}
+herbs_nd_slope <- emmeans(herbs_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+herbs_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_allherbs_A <- 
+herbs_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#8AA17D",
+                  fill = "#8AA17D") +
+  scale_y_continuous(Abundance~(ind.150m^-2),
+                     limits = c(0, 15),
+                     breaks = seq(0, 15, by = 5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Total herbivores") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 14),
+             aes(image = "All_herbs.png"),
+             size = 0.30)
+```
+
+## brow newdata
+
+```{r}
+brow_nd_slope <- emmeans(brow_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_brow_A <- 
+brow_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#929FBD",
+                  fill = "#929FBD") +
+  scale_y_continuous(name = "",
+                     limits = c(0, 5),
+                     breaks = seq(0, 5, by = 2.5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+     theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Browsers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 4.5),
+             aes(image = "naso.png"),
+             size = 0.30)
+```
+
+
+## crop newdata
+
+```{r}
+crop_nd_slope <- emmeans(crop_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+crop_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_crop_A <- 
+crop_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#DDD487",
+                  fill = "#DDD487") +
+  scale_y_continuous(Abundance~(ind.150m^-2),
+                     limits = c(0, 10),
+                     breaks = seq(0, 10, by = 5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+          theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Croppers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 9.5),
+             aes(image = "siganid.png"),
+             size = 0.30)
+```
+
+## det newdata
+
+```{r}
+det_nd_slope <- emmeans(det_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+det_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_det_A <- 
+det_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#8AA17D",
+                  fill = "#8AA17D") +
+  scale_y_continuous(name = "",
+                     limits = c(0, 5),
+                     breaks = seq(0, 5, by = 2.5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+          theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ggtitle("Detritivores") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 4.8),
+             aes(image = "ctenochaetus.png"),
+             size = 0.30)
+```
+
+## exc newdata
+
+```{r}
+exc_nd_slope <- emmeans(exc_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+exc_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_exc_A <- 
+exc_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#E29297",
+                  fill = "#E29297") +
+  scale_y_continuous(Abundance~(ind.150m^-2),
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+    # theme(axis.title.x=element_blank(),
+     #   axis.text.x=element_blank(),
+      #  axis.ticks.x=element_blank()) +
+  ggtitle("Excavators") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 0.9),
+             aes(image = "cholurus.png"),
+             size = 0.30)
+```
+
+
+## scra newdata
+
+```{r}
+scra_nd_slope <- emmeans(scra_mod,
+                          ~Aspect_descriptive,
+                          type = "response") |> 
+  as.data.frame()
+```
+
+## pairwise
+
+```{r}
+scra_mod |> emmeans(~ Aspect_descriptive,
+                         type = "link") |> 
+  pairs() |> 
+  gather_emmeans_draws() |> 
+  mutate(ExpBiom = exp(.value)) |> 
+  dplyr::select(-.chain, 
+                -.value,
+                -.iteration) |> 
+  summarise_draws(median,
+                  HDInterval::hdi,
+                  Pl = ~mean(.x < 1),
+                  Pg = ~mean(.x > 1)) |> 
+  dplyr::filter(Pl > 0.85 | 
+           Pg > 0.85)
+
+```
+
+## plot predicted values of slope
+
+```{r}
+p_slope_scra_A <- 
+scra_nd_slope |> 
+  ggplot(aes(x = Aspect_descriptive,
+             y = prob)) +
+  geom_pointrange(aes(ymin = lower.HPD,
+                      ymax = upper.HPD),
+                  shape = 21,
+                  size = 1,
+                  fatten = 3,
+                  color = "#BFAECF",
+                  fill = "#BFAECF") +
+  scale_y_continuous(Abundance~(ind.150m^-2),
+                     limits = c(0,5),
+                     breaks = seq(0,5, by = 2.5)) +
+  scale_x_discrete(name = "") +
+  theme_classic() +
+        #  theme(axis.title.x=element_blank(),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank()) +
+  ggtitle("Scrapers") +
+  geom_image(data = tibble(Aspect_descriptive = 5,
+                           prob = 4.5),
+             aes(image = "scarus.png"),
+             size = 0.30)
+```
+
+# slope patchwork
+
+```{r}
+p_slope_A <- 
+(p_slope_allherbs_A + p_slope_brow_A) /
+  (p_slope_crop_A + p_slope_det_A) /
+  (p_slope_exc_A + p_slope_scra_A) +
+  plot_annotation(tag_levels = "a")
+```
+
+# slope ggsave
+
+```{r}
+ggsave("Fig. X4. Abundance slope.jpeg",
+       plot =p_slope_A, 
+       dpi = 600, 
+       height = 8.5, 
+       width = 11.5, 
+       units = "in")
+```
